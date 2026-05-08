@@ -1,24 +1,27 @@
 name: megapose
 channels:
-   - conda-forge
-   - pytorch
-   - anaconda
-   - defaults
+  - conda-forge
+  - pytorch
+  - anaconda
+  - defaults
 dependencies:
   - python=3.9
+  - numpy<2
   - pip
   - wget
   - python-wget
   - joblib
-  - pytorch==1.11.0
-  - torchvision==0.12.0
-  - cudatoolkit==11.3.1
+  # Keep the torch stack exactly aligned with MegaPose-tested conda-forge builds.
+  - conda-forge::pytorch==1.11.0
+  - conda-forge::torchvision==0.12.0
+  - conda-forge::cudatoolkit==11.3.1
   - ipython
   - ipykernel
   - jupyterlab
   - notebook
   - nb_conda_kernels
-  - jupyter_contrib_nbextensions
+  # Legacy Notebook 6 extension pack; incompatible with modern notebook 7 stack.
+  # - jupyter_contrib_nbextensions
   - pinocchio
   - rclone
   - pillow
@@ -27,13 +30,16 @@ dependencies:
   - geckodriver
   - firefox
   - pip:
+      # Keep pip from dragging in a newer torch ABI by pinning known-good companions.
+      - kornia==0.6.9
+      - torchgeometry==0.1.2
+      - torchnet==0.0.4
       - meshcat
       - selenium
       - omegaconf
       - simplejson
       - line_profiler 
-      - opencv-python
-      - torchnet
+      - opencv-python==4.11.0.86
       - tqdm
       - lxml
       - transforms3d
@@ -54,7 +60,6 @@ dependencies:
       - pypng
       - h5py 
       - seaborn
-      - kornia 
       - pyarrow 
       - dt_apriltags 
       - open3d
@@ -64,6 +69,5 @@ dependencies:
       - pyyaml
       - psutil
       - webdataset
-      - opencv-contrib-python 
+      - opencv-contrib-python==4.11.0.86
       - roma 
-      - torchgeometry

@@ -66,10 +66,10 @@ class EvaluationRunner:
     @staticmethod
     def make_empty_predictions():
         infos = dict(
-            view_id=np.empty(0, dtype=np.int),
-            scene_id=np.empty(0, dtype=np.int),
-            label=np.empty(0, dtype=np.object),
-            score=np.empty(0, dtype=np.float),
+            view_id=np.empty(0, dtype=np.int64),
+            scene_id=np.empty(0, dtype=np.int64),
+            label=np.empty(0, dtype=object),
+            score=np.empty(0, dtype=np.float64),
         )
         poses = torch.empty(0, 4, 4, dtype=torch.float)
         return tc.PandasTensorCollection(infos=pd.DataFrame(infos), poses=poses)

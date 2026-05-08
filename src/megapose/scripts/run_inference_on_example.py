@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Tuple, Union
 
 # Third Party
+import cv2
 import numpy as np
 from bokeh.io import export_png
 from bokeh.plotting import gridplot
@@ -21,6 +22,7 @@ from megapose.inference.types import (
     PoseEstimatesType,
 )
 from megapose.inference.utils import make_detections_from_object_data
+from megapose.lib3d.rigid_mesh_database import MeshDataBase
 from megapose.lib3d.transform import Transform
 from megapose.panda3d_renderer import Panda3dLightData
 from megapose.panda3d_renderer.panda3d_scene_renderer import Panda3dSceneRenderer
@@ -148,6 +150,144 @@ def run_inference(
     return
 
 
+def project_points_to_image(
+    points_3d: np.ndarray,
+    TCO: np.ndarray,
+    K: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    points_h = np.concatenate((points_3d, np.ones((len(points_3d), 1))), axis=1)
+    points_cam = (TCO @ points_h.T).T[:, :3]
+    z = points_cam[:, 2]
+    valid = z > 1e-6
+    uv = np.full((len(points_3d), 2), np.nan, dtype=np.float64)
+    if valid.any():
+        projected = (K @ points_cam[valid].T).T
+        uv[valid] = projected[:, :2] / projected[:, 2:3]
+    return uv, valid
+
+
+def draw_projected_line(
+    image: np.ndarray,
+    uv: np.ndarray,
+    valid: np.ndarray,
+    i: int,
+    j: int,
+    color: Tuple[int, int, int],
+    thickness: int,
+) -> None:
+    if not (valid[i] and valid[j]):
+        return
+    p1 = tuple(np.round(uv[i]).astype(np.int64))
+    p2 = tuple(np.round(uv[j]).astype(np.int64))
+    cv2.line(image, p1, p2, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+
+def make_pose_bbox_and_axes_overlay(
+    rgb: np.ndarray,
+    camera_data: CameraData,
+    object_datas: List[ObjectData],
+    object_dataset: RigidObjectDataset,
+) -> np.ndarray:
+    vis_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    mesh_db = MeshDataBase.from_object_ds(object_dataset)
+
+    bbox_by_label = {}
+    for label, mesh in mesh_db.meshes.items():
+        obj = mesh_db.obj_dict[label]
+        points_m = np.array(mesh.vertices, dtype=np.float64) * obj.scale
+        bbox_by_label[label] = (points_m.min(axis=0), points_m.max(axis=0))
+
+    K = np.asarray(camera_data.K, dtype=np.float64)
+    bbox_edges = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ]
+
+    for object_data in object_datas:
+        if object_data.TWO is None:
+            continue
+        if object_data.label not in bbox_by_label:
+            logger.warning(f"Skipping unknown object label in visualization: {object_data.label}")
+            continue
+
+        bbox_min, bbox_max = bbox_by_label[object_data.label]
+        x_min, y_min, z_min = bbox_min
+        x_max, y_max, z_max = bbox_max
+        bbox_corners = np.array(
+            [
+                [x_min, y_max, z_max],
+                [x_max, y_max, z_max],
+                [x_max, y_min, z_max],
+                [x_min, y_min, z_max],
+                [x_min, y_max, z_min],
+                [x_max, y_max, z_min],
+                [x_max, y_min, z_min],
+                [x_min, y_min, z_min],
+            ],
+            dtype=np.float64,
+        )
+
+        TCO = np.asarray(object_data.TWO.matrix, dtype=np.float64)
+        uv_bbox, valid_bbox = project_points_to_image(bbox_corners, TCO, K)
+        for i, j in bbox_edges:
+            draw_projected_line(
+                vis_bgr,
+                uv_bbox,
+                valid_bbox,
+                i,
+                j,
+                color=(0, 255, 0),
+                thickness=2,
+            )
+
+        axis_scale = float(np.max(bbox_max - bbox_min))
+        if axis_scale <= 0:
+            axis_scale = 0.05
+        axis_scale *= 0.6
+        axis_points = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [axis_scale, 0.0, 0.0],
+                [0.0, axis_scale, 0.0],
+                [0.0, 0.0, axis_scale],
+            ],
+            dtype=np.float64,
+        )
+        uv_axes, valid_axes = project_points_to_image(axis_points, TCO, K)
+        if valid_axes[0]:
+            origin = tuple(np.round(uv_axes[0]).astype(np.int64))
+            axis_colors = [
+                (0, 0, 255),  # X (red)
+                (0, 255, 0),  # Y (green)
+                (255, 0, 0),  # Z (blue)
+            ]
+            for axis_idx, color in zip([1, 2, 3], axis_colors):
+                if not valid_axes[axis_idx]:
+                    continue
+                endpoint = tuple(np.round(uv_axes[axis_idx]).astype(np.int64))
+                cv2.arrowedLine(
+                    vis_bgr,
+                    origin,
+                    endpoint,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                    tipLength=0.15,
+                )
+
+    return cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+
+
 def make_output_visualization(
     example_dir: Path,
 ) -> None:
@@ -156,6 +296,12 @@ def make_output_visualization(
     camera_data.TWC = Transform(np.eye(4))
     object_datas = load_object_data(example_dir / "outputs" / "object_data.json")
     object_dataset = make_object_dataset(example_dir)
+    pose_overlay = make_pose_bbox_and_axes_overlay(
+        rgb=rgb,
+        camera_data=camera_data,
+        object_datas=object_datas,
+        object_dataset=object_dataset,
+    )
 
     renderer = Panda3dSceneRenderer(object_dataset)
 
@@ -184,11 +330,16 @@ def make_output_visualization(
         rgb, renderings.rgb, dilate_iterations=1, color=(0, 255, 0)
     )["img"]
     fig_contour_overlay = plotter.plot_image(contour_overlay)
-    fig_all = gridplot([[fig_rgb, fig_contour_overlay, fig_mesh_overlay]], toolbar_location=None)
+    fig_pose_overlay = plotter.plot_image(pose_overlay)
+    fig_all = gridplot(
+        [[fig_rgb, fig_contour_overlay, fig_mesh_overlay, fig_pose_overlay]],
+        toolbar_location=None,
+    )
     vis_dir = example_dir / "visualizations"
     vis_dir.mkdir(exist_ok=True)
     export_png(fig_mesh_overlay, filename=vis_dir / "mesh_overlay.png")
     export_png(fig_contour_overlay, filename=vis_dir / "contour_overlay.png")
+    export_png(fig_pose_overlay, filename=vis_dir / "pose_bbox_axes_overlay.png")
     export_png(fig_all, filename=vis_dir / "all_results.png")
     logger.info(f"Wrote visualizations to {vis_dir}.")
     return

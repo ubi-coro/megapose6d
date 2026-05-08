@@ -76,6 +76,26 @@ conda activate megapose
 pip install -e .
 ```
 
+Sanity-check that the torch stack is consistent (recommended before running inference):
+```
+python -c "import torch, torchvision, numpy as np; print(torch.__version__, torch.version.cuda); print(torchvision.__version__); print(np.__version__)"
+```
+Expected versions for this repo are:
+- `torch==1.11.x`
+- `torchvision==0.12.x`
+- `numpy<2`
+
+Important: avoid installing `torch`/`torchvision` with `pip` after environment creation, since that can silently replace conda binaries and break CUDA/ABI compatibility.
+If these versions drift, repair with:
+```
+conda install -n megapose -c conda-forge \
+  pytorch==1.11.0 torchvision==0.12.0 cudatoolkit==11.3.1 "numpy<2"
+```
+If conda reports `CondaVerificationError` for a cached torch package, clean the cache and retry:
+```
+conda clean --packages --tarballs --yes
+```
+
 If you plan to further develop the MegaPose code, you may want to install dev tools via `pip install -e ".[ci,dev]"`. See [here](#dev-ops) for more details.
 
 ### Option B: Docker Installation
@@ -238,6 +258,50 @@ python -m megapose.scripts.run_inference_on_example barbecue-sauce --vis-detecti
 ```
 
 <img src="images/example/detections.png" width="500">
+
+
+## 2.b Convert BundleSDF-style captures to MegaPose examples (optional)
+If your data is in a structure like:
+```
+$MEGAPOSE_DATA_DIR/power_connector/
+    captures/rgb/*.png
+    captures/depth/*.png
+    captures/masks/*.png
+    captures/cam_K.txt
+    captures/metadata.json
+    mesh/textured_mesh.obj
+```
+you can convert it to the same inference format as `examples/barbecue-sauce` with:
+```
+python -m megapose.scripts.convert_bundlesdf_to_examples \
+    --source-dir $MEGAPOSE_DATA_DIR/power_connector
+```
+
+By default, this converts **all** frames into:
+```
+$MEGAPOSE_DATA_DIR/examples/power-connector/
+    meshes/power-connector/...
+    000000/
+    000001/
+    ...
+```
+
+To convert only specific frame indices:
+```
+python -m megapose.scripts.convert_bundlesdf_to_examples \
+    --source-dir $MEGAPOSE_DATA_DIR/power_connector \
+    --frame-index 120
+```
+
+Then run inference on that converted frame with:
+```
+python -m megapose.scripts.run_inference_on_example power-connector/000120 --run-inference
+```
+
+Notes:
+- The converter extracts `bbox_modal` from binary masks.
+- It writes `camera_data.json` in the format expected by `run_inference_on_example.py`.
+- It converts mesh vertices from meters to millimeters by default (`--mesh-scale 1000`) so the mesh scale matches MegaPose example assumptions.
 
 
 ## 3. Run pose estimation and visualize results
