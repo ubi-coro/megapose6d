@@ -2,14 +2,13 @@
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import List, Tuple, Union
 
 # Third Party
 import cv2
 import numpy as np
-from bokeh.io import export_png
-from bokeh.plotting import gridplot
 from PIL import Image
 
 # MegaPose
@@ -29,8 +28,7 @@ from megapose.panda3d_renderer.panda3d_scene_renderer import Panda3dSceneRendere
 from megapose.utils.conversion import convert_scene_observation_to_panda3d
 from megapose.utils.load_model import NAMED_MODELS, load_named_model
 from megapose.utils.logging import get_logger, set_logging_level
-from megapose.visualization.bokeh_plotter import BokehPlotter
-from megapose.visualization.utils import make_contour_overlay
+from megapose.visualization.utils import get_mask_from_rgb, make_contour_overlay
 
 logger = get_logger(__name__)
 
@@ -98,12 +96,25 @@ def make_detections_visualization(
 ) -> None:
     rgb, _, _ = load_observation(example_dir, load_depth=False)
     detections = load_detections(example_dir)
-    plotter = BokehPlotter()
-    fig_rgb = plotter.plot_image(rgb)
-    fig_det = plotter.plot_detections(fig_rgb, detections=detections)
+    det_img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    boxes = detections.bboxes.cpu().numpy()
+    for n, box in enumerate(boxes):
+        x1, y1, x2, y2 = np.round(box).astype(np.int64)
+        cv2.rectangle(det_img, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)
+        label = str(detections.infos.iloc[n].label)
+        cv2.putText(
+            det_img,
+            label,
+            (x1, max(0, y1 - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
     output_fn = example_dir / "visualizations" / "detections.png"
     output_fn.parent.mkdir(exist_ok=True)
-    export_png(fig_det, filename=output_fn)
+    Image.fromarray(cv2.cvtColor(det_img, cv2.COLOR_BGR2RGB)).save(output_fn)
     logger.info(f"Wrote detections visualization: {output_fn}")
     return
 
@@ -288,6 +299,20 @@ def make_pose_bbox_and_axes_overlay(
     return cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
 
 
+def make_mesh_overlay_image(rgb_input: np.ndarray, rgb_rendered: np.ndarray) -> np.ndarray:
+    assert rgb_input.dtype == np.uint8 and rgb_rendered.dtype == np.uint8
+    mask = get_mask_from_rgb(rgb_rendered)
+
+    rgb_overlay = np.zeros_like(rgb_input, dtype=np.float32)
+    rgb_overlay[~mask] = rgb_input[~mask] * 0.6 + 255 * 0.4
+    rgb_overlay[mask] = rgb_rendered[mask] * 0.8 + 255 * 0.2
+    return rgb_overlay.astype(np.uint8)
+
+
+def save_rgb_image(image: np.ndarray, filename: Path) -> None:
+    Image.fromarray(np.asarray(image, dtype=np.uint8)).save(filename)
+
+
 def make_output_visualization(
     example_dir: Path,
 ) -> None:
@@ -322,25 +347,18 @@ def make_output_visualization(
         copy_arrays=True,
     )[0]
 
-    plotter = BokehPlotter()
-
-    fig_rgb = plotter.plot_image(rgb)
-    fig_mesh_overlay = plotter.plot_overlay(rgb, renderings.rgb)
+    mesh_overlay = make_mesh_overlay_image(rgb, renderings.rgb)
     contour_overlay = make_contour_overlay(
         rgb, renderings.rgb, dilate_iterations=1, color=(0, 255, 0)
     )["img"]
-    fig_contour_overlay = plotter.plot_image(contour_overlay)
-    fig_pose_overlay = plotter.plot_image(pose_overlay)
-    fig_all = gridplot(
-        [[fig_rgb, fig_contour_overlay, fig_mesh_overlay, fig_pose_overlay]],
-        toolbar_location=None,
-    )
+    all_results = np.concatenate((rgb, contour_overlay, mesh_overlay, pose_overlay), axis=1)
+
     vis_dir = example_dir / "visualizations"
     vis_dir.mkdir(exist_ok=True)
-    export_png(fig_mesh_overlay, filename=vis_dir / "mesh_overlay.png")
-    export_png(fig_contour_overlay, filename=vis_dir / "contour_overlay.png")
-    export_png(fig_pose_overlay, filename=vis_dir / "pose_bbox_axes_overlay.png")
-    export_png(fig_all, filename=vis_dir / "all_results.png")
+    save_rgb_image(mesh_overlay, vis_dir / "mesh_overlay.png")
+    save_rgb_image(contour_overlay, vis_dir / "contour_overlay.png")
+    save_rgb_image(pose_overlay, vis_dir / "pose_bbox_axes_overlay.png")
+    save_rgb_image(all_results, vis_dir / "all_results.png")
     logger.info(f"Wrote visualizations to {vis_dir}.")
     return
 
@@ -377,3 +395,8 @@ if __name__ == "__main__":
 
     if args.vis_outputs:
         make_output_visualization(example_dir)
+        # Panda3D can abort during interpreter teardown in this headless setup.
+        # At this point all requested files have been written, so exit cleanly.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)

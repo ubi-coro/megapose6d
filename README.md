@@ -304,6 +304,101 @@ Notes:
 - It converts mesh vertices from meters to millimeters by default (`--mesh-scale 1000`) so the mesh scale matches MegaPose example assumptions.
 
 
+## 2.c Convert Stecker/yellow-connector captures with manual meshes (optional)
+The project also contains a convenience converter for the local Stecker/yellow-connector
+capture layout:
+
+```
+/vol/coro/dtrofimov/data/projects/captures/{capture_id}/
+    rgb/{idx:05d}.png
+    depth/{idx:05d}.png
+    camera.json
+    sam3_annotations/masks/obj_*__class_{class_id}__*/frame_{idx:06d}.png
+
+/vol/coro/dtrofimov/data/projects/yellow_connector_manual/plug/
+    plug.obj
+    plug.mtl
+```
+
+Example:
+
+```
+python -m megapose.scripts.convert_stecker_to_example \
+    --capture-id lab_1 \
+    --mesh-dir /vol/coro/dtrofimov/data/projects/yellow_connector_manual/plug \
+    --output-dir $MEGAPOSE_DATA_DIR/examples/yellow-connector-lab1-manual \
+    --label yellow-connector \
+    --class-id 1 \
+    --frames 0 \
+    --overwrite
+```
+
+The script writes the same example layout consumed by `run_inference_on_example.py`:
+
+```
+$MEGAPOSE_DATA_DIR/examples/yellow-connector-lab1-manual/
+    meshes/yellow-connector/...
+    000000/
+        image_rgb.png
+        image_depth.png
+        camera_data.json
+        inputs/object_data.json
+        meshes/yellow-connector -> ../../meshes/yellow-connector
+```
+
+Mesh handling details:
+- The input mesh is assumed to be in meters. It is copied into the example mesh directory
+  and scaled to millimeters by default (`--mesh-scale 1000`), matching the assumptions in
+  `run_inference_on_example.py`.
+- If the mesh has fewer than `--min-mesh-vertices` loaded vertices, default `2000`, the
+  copied OBJ is midpoint-subdivided until it is large enough for MegaPose point sampling.
+- If the OBJ references an MTL file with real texture maps such as `map_Kd`, the converter
+  copies the MTL and referenced texture files and leaves the material references unchanged.
+- If the OBJ references an MTL file that has only diffuse material colors (`Kd`) and no
+  texture maps, the converter synthesizes simple solid-color textures by default. It creates
+  one PNG per material (`material_color_00.png`, `material_color_01.png`, ...), adds matching
+  `map_Kd` entries to the copied MTL, inserts a small set of `vt` texture coordinates, and
+  rewrites OBJ faces so Panda3D can render the material colors through texture lookup.
+- If no MTL or no diffuse colors are available, no synthetic texture is generated.
+
+Use `--no-material-color-textures` to reproduce a textureless comparison export:
+
+```
+python -m megapose.scripts.convert_stecker_to_example \
+    --capture-id lab_1 \
+    --mesh-dir /vol/coro/dtrofimov/data/projects/yellow_connector_manual/plug \
+    --output-dir $MEGAPOSE_DATA_DIR/examples/yellow-connector-lab1-manual-textureless \
+    --label yellow-connector \
+    --class-id 1 \
+    --frames 0 \
+    --no-material-color-textures \
+    --overwrite
+```
+
+With this flag, the remeshed OBJ keeps the MTL diffuse colors but receives no generated
+PNG textures, no `map_Kd` entries, and no generated UV coordinates. This is useful for
+comparing MegaPose outputs with and without renderer-friendly material-color textures.
+
+Practical caveat: the subdivision fallback rewrites the OBJ geometry. For meshes that already
+have real UV textures, provide a source mesh with at least `--min-mesh-vertices` vertices, or
+lower/disable the threshold, so the converter does not need to subdivide and disturb existing
+UV texture coordinates.
+
+`run_inference_on_example.py --vis-outputs` renders the predicted pose with MegaPose's
+`Panda3dSceneRenderer`. Internally, this uses Panda3D to load the OBJ/MTL assets, place the
+object at the estimated `TWO` pose, render it from the input camera intrinsics, and then save:
+
+```
+visualizations/mesh_overlay.png
+visualizations/contour_overlay.png
+visualizations/pose_bbox_axes_overlay.png
+visualizations/all_results.png
+```
+
+For a short introduction to Panda3D itself, see the official Panda3D manual:
+https://docs.panda3d.org/1.11/python/index
+
+
 ## 3. Run pose estimation and visualize results
 Run inference with the following command:
 ```
@@ -337,6 +432,35 @@ $MEGAPOSE_DATA_DIR/examples/barbecue-sauce/
 ```
 
 <img src="images/example/all_results.png" width="1000">
+
+## 3.b Track from a Previous Pose
+For video use, the expensive coarse render-and-compare stage can be skipped when
+an initial pose estimate from the previous frame is available. Use
+`PoseEstimator.run_tracking_pipeline(...)` with a `PoseEstimatesType` containing
+the previous object-to-camera transform. This runs the refiner directly and can
+optionally run the scoring model afterwards:
+
+- `run_scoring=False`: lowest-latency tracking update.
+- `run_scoring=True`: additionally returns a score/logit that can be used to
+  monitor drift or trigger a full coarse reinitialization.
+
+The example profiling script runs normal inference once, feeds that pose back as
+the initial estimate, and writes `outputs/object_data_tracking.json`:
+
+```
+python -m megapose.scripts.run_tracking_from_pose_on_example \
+    barbecue-sauce \
+    --model megapose-1.0-RGBD
+```
+
+For the fastest refiner-only path:
+
+```
+python -m megapose.scripts.run_tracking_from_pose_on_example \
+    barbecue-sauce \
+    --model megapose-1.0-RGBD \
+    --no-scoring
+```
 
 # Model Zoo
 

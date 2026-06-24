@@ -640,6 +640,85 @@ class PoseEstimator(torch.nn.Module):
 
         return data_TCO_final, extra_data
 
+    @torch.no_grad()
+    def run_tracking_pipeline(
+        self,
+        observation: ObservationTensor,
+        initial_estimates: PoseEstimatesType,
+        n_refiner_iterations: int = 5,
+        keep_all_refiner_outputs: bool = False,
+        run_scoring: bool = True,
+        run_depth_refiner: bool = False,
+        bsz_objects: Optional[int] = None,
+        cuda_timer: bool = False,
+    ) -> Tuple[PoseEstimatesType, dict]:
+        """Track pose by refining provided initial pose estimates.
+
+        This skips the expensive detector/coarse stage and is intended for
+        video tracking where a previous-frame pose is available. If
+        ``run_scoring`` is enabled, the refined poses are scored and reduced to
+        the best pose per object instance. If disabled, the refined poses are
+        returned directly for the lowest-latency tracking loop.
+        """
+
+        timer = SimpleTimer()
+        timer.start()
+        timing_str = ""
+
+        if bsz_objects is not None:
+            self.bsz_objects = bsz_objects
+
+        initial_estimates = megapose.inference.utils.add_instance_id(initial_estimates)
+
+        preds, refiner_extra_data = self.forward_refiner(
+            observation,
+            initial_estimates,
+            n_iterations=n_refiner_iterations,
+            keep_all_outputs=keep_all_refiner_outputs,
+            cuda_timer=cuda_timer,
+        )
+        data_TCO_refined = preds[f"iteration={n_refiner_iterations}"]
+        timing_str += f"refiner={refiner_extra_data['time']:.2f}, "
+
+        scoring_extra_data = None
+        data_TCO_scored = None
+        if run_scoring:
+            data_TCO_scored, scoring_extra_data = self.forward_scoring_model(
+                observation,
+                data_TCO_refined,
+                cuda_timer=cuda_timer,
+            )
+            timing_str += f"scoring={scoring_extra_data['time']:.2f}, "
+            data_TCO_final = self.filter_pose_estimates(
+                data_TCO_scored, top_K=1, filter_field="pose_logit"
+            )
+        else:
+            data_TCO_final = data_TCO_refined
+
+        data_TCO_depth_refiner = None
+        if run_depth_refiner:
+            depth_refiner_start = time.time()
+            data_TCO_depth_refiner, _ = self.run_depth_refiner(observation, data_TCO_final)
+            data_TCO_final = data_TCO_depth_refiner
+            depth_refiner_time = time.time() - depth_refiner_start
+            timing_str += f"depth refiner={depth_refiner_time:.2f}, "
+
+        timer.stop()
+        timing_str = f"total={timer.elapsed():.2f}, {timing_str}"
+
+        extra_data: dict = dict()
+        extra_data["initial"] = {"preds": initial_estimates}
+        extra_data["refiner_all_hypotheses"] = {"preds": preds, "data": refiner_extra_data}
+        extra_data["scoring"] = {"preds": data_TCO_scored, "data": scoring_extra_data}
+        extra_data["refiner"] = {"preds": data_TCO_final, "data": refiner_extra_data}
+        extra_data["timing_str"] = timing_str
+        extra_data["time"] = timer.elapsed()
+
+        if run_depth_refiner:
+            extra_data["depth_refiner"] = {"preds": data_TCO_depth_refiner}
+
+        return data_TCO_final, extra_data
+
     def filter_pose_estimates(
         self,
         data_TCO: PoseEstimatesType,
